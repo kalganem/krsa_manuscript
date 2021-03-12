@@ -1,1 +1,35 @@
-# krsa_manuscript
+# Introduction
+
+This repo is for the KRSA application note submission
+
+# Analysis Script
+
+The full analysis script is found in krsa_manuscript_analysis.Rmd
+
+# Data
+
+The datasets files are found in the data folder
+
+## Parameters Used for this analysis:
+
+-   chip type: "STK"
+
+-   minimum signal: 5 (to filter out peptides with low signals)
+
+-   $R^2$: 0.9 (to filter out peptides with weak linear fit)
+
+-   Log2 Fold change cutoffs: (0.2,0.3,0.4)
+
+-   byChip: FALSE (across chip analysis)
+
+-   KRSA function parameters (for upstream kinase analysis):
+
+    -   mapping file: KRSA_coverage_STK_PamChip_87102_v1 (built in the KRSA package)
+
+    -   coverage file: KRSA_coverage_STK_PamChip_87102_v1 (built in the KRSA package)
+
+    -   iterations: 2000
+
+    -   seed number: 123
+
+-   Z score cutoff: 2
