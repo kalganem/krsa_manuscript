@@ -14,6 +14,8 @@ library(tidyverse)
 
 library(gt) # can be used to view tables
 library(furrr)
+
+theme_set(theme_bw())
 ```
 
 ## Reading Data
@@ -174,6 +176,8 @@ krsa_quick_filter(data = data_pw_200, data2 = data_modeled$scaled,
 # This function calculates log2 fold change values between the defined groups
 # The byChip argument lets you calculates the log2 fold change the results within each chip
 krsa_group_diff(data_modeled$scaled, comparisons$Comp1, pep_passed_qc, byChip = F) -> diff_df
+
+write_delim(diff_df, "DLPFC_LFC.txt", delim = "\t")
 
 # Extract top peptides based on the LFC cutoff
 krsa_get_diff(diff_df,LFC ,c(0.2,0.3,0.4)) %>% list("meanLFC" = .) -> sigPeps
@@ -526,7 +530,9 @@ tidydata2 %>%
   group_by(Gender, Peptide) %>% 
   summarise(mean = mean(AvgSignal)) %>% 
   pivot_wider(names_from = Gender, values_from = mean) %>% 
-  mutate(LFC = M - F) %>% select(Peptide, LFC) -> ad_lfc_table
+  mutate(LFC = M - `F`) %>% select(Peptide, LFC) -> ad_lfc_table
+
+write_delim(ad_lfc_table, "HPC_LFC_table.txt", delim = "\t")
 
 
 krsa_get_diff(ad_lfc_table,LFC ,c(0.2,0.3,0.4)) %>% list("meanLFC" = .) -> ad_peps
@@ -627,6 +633,10 @@ krsa_zscores_plot(AvgZTable_ad)
 DLPFC_hits <- read_delim("acrossChip_KRSA_Table_multipleComp.txt", delim = "\t")
 HPC_hits <- read_delim("acrossChip_KRSA_Table_multipleComp_AD.txt", delim = "\t")
 
+
+
+
+
 DLPFC_hits %>% filter(abs(AvgZ) >= 2) %>% pull(Kinase) %>% unique() -> DLPFC_hits_top_2
 HPC_hits %>% filter(abs(AvgZ) >= 2) %>% pull(Kinase) %>% unique() -> HPC_hits_top_2
 
@@ -647,27 +657,211 @@ RAM::group.venn(x2,
 
 ```{r}
 
-dplfc_tbl <- read_delim("acrossChip_KRSA_FullTable_0_2LFC.txt", delim = "\t")
-hpc_tbl <- read_delim("acrossChip_KRSA_Table_0_2_AD.txt", delim = "\t")
+# dplfc_tbl <- read_delim("DLPFC_LFC.txt", delim = "\t") %>% mutate(Region = "DLPFC")
+# hpc_tbl <- read_delim("HPC_LFC_table.txt", delim = "\t") %>% mutate(Region = "HPC")
+
+# comparing DLPFC and HPC kinase hit
+DLPFC_hits <- read_delim("acrossChip_KRSA_Table_multipleComp.txt", delim = "\t")  %>% mutate(Region = "DLPFC")
+HPC_hits <- read_delim("acrossChip_KRSA_Table_multipleComp_AD.txt", delim = "\t")  %>% mutate(Region = "HPC")
 
 
-# dplfc_tbl %>% 
-#   head(10) %>% 
-#   mutate_if(is.numeric, round, 2) %>% 
-#   gt() %>% 
-#   cols_align(align = "center") %>% 
-#   gtsave("figures/dlpfc_krsaTable.png")
+pdf("figures/DLPFC_HPC_Z_Scores_Correlation.pdf", useDingbats = F, width = 6, height = 4)
+rbind(DLPFC_hits, HPC_hits) %>% 
+  select(Kinase, AvgZ, Region) %>% distinct() %>% 
+  #filter(abs(AvgZ) >= 0.2) %>% 
+  pivot_wider(names_from = Region, values_from = AvgZ) %>% 
+  ggplot(aes(DLPFC, HPC)) + 
+  geom_point() +
+  ggpubr::stat_cor(method = "pearson") +
+  geom_smooth(method = "lm") +
+  theme_bw()
+dev.off()
 
 
-# hpc_tbl %>% 
-#   head(10) %>% 
-#   mutate_if(is.numeric, round, 2) %>% 
-#   gt() %>% 
-#   cols_align(align = "center") %>% 
-#   gtsave("figures/hpc_krsaTable.png")
 
 
 ```
+
+### Adding Noise
+```{r}
+LFC_values <- read_delim("DLPFC_LFC.txt", delim = "\t")
+
+
+chipCov <- KRSA_coverage_STK_PamChip_87102_v1
+KRSA_file <- KRSA_Mapping_STK_PamChip_87102_v1
+
+library(furrr)
+plan(multisession)
+
+
+add_noise <- function(x, noise_seed = T) {
+  input_data <- LFC_values$LFC
+  signal_to_noise_ratio = x
+  if(noise_seed == T) {
+    set.seed(123)
+  }
+
+  noise <- rnorm(input_data) # generate standard normal errors
+  k <- sqrt(var(input_data)/(signal_to_noise_ratio*var(noise)))
+  LFC_values$LFC_with_noise <- input_data + k*noise 
+  LFC_values$SNR <- rep(x, length(input_data))
+  LFC_values
+}
+
+krsa2 <- function (peptides, itr = 2000, return_count = F, 
+          map_file = KRSA_file, cov_file = chipCov) {
+  message("Running KRSA ...")
+  temp <- purrr::map_df(1:itr, krsa_sampling, cov_file, map_file, 
+                        length(peptides))
+  temp2 <- temp %>% dplyr::group_by(Kin) %>% dplyr::summarise(SamplingAvg = mean(counts), 
+                                                              SD = stats::sd(counts))
+  temp3 <- cov_file %>% dplyr::group_by(Kin) %>% dplyr::summarise(Observed = sum(Substrates %in% 
+                                                                                   peptides))
+  fin <- dplyr::left_join(temp2, temp3) %>% dplyr::mutate(Z = (Observed - 
+                                                                 SamplingAvg)/SD) %>% dplyr::arrange(dplyr::desc(abs(Z))) %>% 
+    dplyr::filter(!Kin %in% c("BARK1", "VRK2")) %>% dplyr::select(Kin, 
+                                                                  Observed, SamplingAvg, SD, Z) %>% dplyr::rename(Kinase = Kin)
+  if (return_count == T) {
+    return(list(count_mtx = temp, KRSA_Table = fin))
+  }
+  else {
+    fin
+  }
+}
+
+run_krsa_with_noise <- function(x, by_raw = T, noise_seed = T, krsa_seed = T) {
+  
+  if(by_raw == T) {
+    
+    input_data <- data_modeled$scaled$slope
+    signal_to_noise_ratio = x
+    
+    if(noise_seed == T) {
+      set.seed(123)
+     }
+    
+    noise <- rnorm(input_data) # generate standard normal errors
+    k <- sqrt(var(input_data)/(signal_to_noise_ratio*var(noise)))
+    data_modeled$scaled$slope <- input_data + k*noise 
+    
+    krsa_group_diff(data_modeled$scaled, c("M", "F"), pep_passed_qc, byChip = F) %>% 
+      rename(LFC_with_noise = LFC) -> lfc_tbl_with_noise
+  }
+  
+  else {
+    lfc_tbl_with_noise <- add_noise(x, noise_seed = noise_seed)
+  }
+  
+
+  krsa_get_diff(lfc_tbl_with_noise,LFC_with_noise ,c(0.2,0.3,0.4)) %>% list("meanLFC" = .) -> sigPeps
+  sigPeps_total <- list(sigPeps) %>% unlist(recursive = F) %>%  unlist(recursive = F)
+  
+  print(map_dbl(sigPeps_total, length))
+  
+  suppressMessages({
+    if(krsa_seed) {
+      future_map(sigPeps_total, krsa) -> mutiple_krsa_outputs
+    }
+    
+    else {
+      future_map(sigPeps_total, krsa2) -> mutiple_krsa_outputs
+    }
+    
+  })
+
+  df <- data.frame(matrix(unlist(mutiple_krsa_outputs), ncol = max(lengths(mutiple_krsa_outputs)), byrow = TRUE))
+  df <- setNames(do.call(rbind.data.frame, mutiple_krsa_outputs), names(mutiple_krsa_outputs$meanLFC.0.2))
+  
+  df %>% rownames_to_column("method") %>% select(Kinase, Z, method) %>% 
+    mutate(method = str_extract(method, "\\w+\\.\\w+\\.\\w+")) %>% 
+    mutate(method = gsub("(^\\w+)[\\.]", "\\1>", method)) %>% 
+    mutate_if(is.numeric, round, 2) %>% 
+    filter(grepl("mean", method)) %>% 
+    select(Kinase, Z, method) %>% group_by(Kinase) %>% mutate(AvgZ = mean(Z)) %>% 
+    ungroup() %>% 
+    select(Kinase, AvgZ) %>% distinct() %>% 
+    mutate(SNR = x) -> AvgZTable
+  
+  AvgZTable
+  
+}
+
+
+org_krsa_table <- read_delim("acrossChip_KRSA_Table_multipleComp.txt", delim = "\t") %>% 
+  mutate_if(is.numeric, round, 2) %>% 
+  filter(grepl("mean", method)) %>% 
+  select(Kinase, Z, method) %>% group_by(Kinase) %>% mutate(AvgZ = mean(Z)) %>% 
+  ungroup() %>% 
+  select(Kinase, AvgZ) %>% distinct() %>% 
+  mutate(SNR = "Raw_Data") -> org_krsa_table
+
+
+# LFC
+# noise seed = F, krsa seed = T
+map_df(seq(1, to = 30, by = 1), run_krsa_with_noise, by_raw = F, noise_seed = F) -> final_res
+rbind(final_res, org_krsa_table) -> final_res2
+
+final_res2 %>% pivot_wider(names_from = SNR, values_from = AvgZ) %>% 
+  column_to_rownames("Kinase") -> noise_done_on_LFC_unseeded
+
+
+# Model
+
+
+
+
+
+Cor_noise_done_on_LFC_unseeded<- cor(noise_done_on_LFC_unseeded, method = "pearson")
+
+plot_SNR_Cor <- function(x, title) {
+  x  %>% as.data.frame() %>% 
+  rownames_to_column("SNR") %>% 
+  select(SNR, everything()) %>% 
+  pivot_longer(2:ncol(.), names_to = "Method", values_to = "Cor") %>% 
+  filter(Method == "Raw_Data") %>% filter(SNR != "Raw_Data") %>% 
+  mutate(SNR = as.numeric(SNR)) %>% 
+  #mutate(SNR = factor(SNR, levels = seq(1, to =  30, by = 1 ))) %>% 
+  ggplot(aes(SNR, Cor)) + geom_point() + geom_line() +
+  labs(title = title)
+}
+
+
+pdf("SNR_test.pdf", useDingbats = F)
+plot_SNR_Cor(Cor_noise_done_on_LFC_unseeded, "")
+dev.off()
+
+
+
+# noise seed = T, krsa seed = T
+# map_df(seq(1, to = 30, by = 1), run_krsa_with_noise, by_raw = F) -> final_res
+# rbind(final_res, org_krsa_table) -> final_res2
+# 
+# final_res2 %>% pivot_wider(names_from = SNR, values_from = AvgZ) %>% 
+#   column_to_rownames("Kinase") -> noise_done_on_LFC_seeded
+
+# noise seed = T, krsa seed = T
+# map_df(seq(1, to = 30, by = 1), run_krsa_with_noise, by_raw = T) -> final_res
+# rbind(final_res, org_krsa_table) -> final_res2
+# 
+# final_res2 %>% pivot_wider(names_from = SNR, values_from = AvgZ) %>% 
+#   column_to_rownames("Kinase") -> noise_done_on_Model_seeded
+# 
+# # noise seed = F, krsa seed = T
+# map_df(seq(1, to = 30, by = 1), run_krsa_with_noise, by_raw = T, noise_seed = F) -> final_res
+# rbind(final_res, org_krsa_table) -> final_res2
+# 
+# final_res2 %>% pivot_wider(names_from = SNR, values_from = AvgZ) %>% 
+#   column_to_rownames("Kinase") -> noise_done_on_Model_unseeded
+#Cor_noise_done_on_Model_seeded<- cor(noise_done_on_Model_seeded, method = "pearson")
+# Cor_noise_done_on_Model_unseeded<- cor(noise_done_on_Model_unseeded, method = "pearson")
+# Cor_noise_done_on_LFC_seeded <- cor(noise_done_on_LFC_seeded, method = "pearson")
+#plot_SNR_Cor(Cor_noise_done_on_LFC_seeded, "Cor_noise_done_on_LFC_seeded")
+# plot_SNR_Cor(Cor_noise_done_on_Model_seeded, "Cor_noise_done_on_Model_seeded")
+# plot_SNR_Cor(Cor_noise_done_on_Model_unseeded, "Cor_noise_done_on_Model_unseeded")
+
+```
+
+
 
 #### Session Info
 
